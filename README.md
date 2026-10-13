@@ -57,6 +57,7 @@ Then edit it:
 | `standup.headings`         | Previous Work day Progress / Plans for today / Blockers | Rename to match your team's format          |
 | `standup.max_plan_bullets` | `3`                                                     | Upper limit; the skill often uses fewer     |
 | `standup.example`          | empty                                                   | One plans bullet in your own words          |
+| `notes_patterns`           | `.plans/`, `*notes*.md`, `*plan*.md`, `*todo*.md`, …    | Files where Claude Code keeps your session notes. What gets written to them each day feeds the detailed log |
 | `sources.cursor` etc.      | `true`                                                  | Set `false` to skip a local source          |
 
 

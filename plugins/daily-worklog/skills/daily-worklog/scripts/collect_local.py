@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -43,15 +44,23 @@ DEFAULTS = {
     "role": "",               # free text: what this person's work looks like
     "standup": {
         "headings": {
-            "progress": "Previous Work day Progress",
+            "progress": "Previous work day progress",
             "plans": "Plans for today",
             "blockers": "Blockers",
         },
         "max_plan_bullets": 3,
         "example": "",        # optional: a plans bullet written in your own voice
     },
-    "max_prompts_per_session": 15,
-    "max_prompt_chars": 280,
+    "max_prompts_per_session": 50,
+    "max_prompt_chars": 1000,
+    # Files that hold your own session notes / plans. Text Claude Code wrote
+    # to these during the window is captured so the log can say what you learned.
+    "notes_patterns": [
+        "*/.plans/*", "*notes*.md", "*plan*.md", "*todo*.md",
+        "*learnings*.md", "*journal*.md", "*progress*.md",
+    ],
+    "max_notes_chars_per_file": 8000,
+    "idle_gap_minutes": 15,   # gaps longer than this don't count as active time
 }
 
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
@@ -100,6 +109,30 @@ def redact(text):
     for pat in SECRET_PATTERNS:
         text = pat.sub("[REDACTED]", text)
     return text
+
+
+def clip_block(text, limit):
+    """Clip but keep line breaks (for notes)."""
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def is_notes_file(path, patterns):
+    low = path.lower()
+    return any(fnmatch.fnmatch(low, pat.lower()) for pat in patterns)
+
+
+def active_minutes(times, gap_minutes):
+    """Sum of intervals between consecutive events, ignoring idle gaps."""
+    if not times:
+        return 0
+    times = sorted(times)
+    gap = timedelta(minutes=gap_minutes)
+    total = timedelta()
+    for a, b in zip(times, times[1:]):
+        if b - a <= gap:
+            total += b - a
+    return int(round(total.total_seconds() / 60))
 
 
 def clip(text, limit):
@@ -223,6 +256,7 @@ def collect_claude(cfg, start, end):
                 if not in_window(ts, start, end):
                     continue
                 s = sessions.setdefault(sid, _new_session(sid))
+                s["times"].append(ts)
                 s["first"] = min(filter(None, [s["first"], ts]))
                 s["last"] = max(filter(None, [s["last"], ts]))
                 if e.get("cwd"):
@@ -246,6 +280,19 @@ def collect_claude(cfg, start, end):
                             fp = inp.get("file_path") or inp.get("notebook_path")
                             if fp:
                                 s["files"].add(fp)
+                                if is_notes_file(fp, cfg["notes_patterns"]):
+                                    written = []
+                                    if name == "Write":
+                                        written.append(inp.get("content", ""))
+                                    elif name == "Edit":
+                                        written.append(inp.get("new_string", ""))
+                                    elif name == "MultiEdit":
+                                        for ed in inp.get("edits") or []:
+                                            if isinstance(ed, dict):
+                                                written.append(ed.get("new_string", ""))
+                                    for w in written:
+                                        if w and w.strip():
+                                            s["notes"].setdefault(fp, []).append(redact(w))
                         elif name == "Bash":
                             cmd = str(inp.get("command", ""))
                             if re.search(r"\b(git (commit|push|merge|rebase)|gh pr (create|merge))\b", cmd):
@@ -277,6 +324,15 @@ def collect_claude(cfg, start, end):
             "prompts": prompts,
             "files_edited": files[:40],
             "files_edited_count": len(files),
+            "active_minutes": active_minutes(s["times"], cfg["idle_gap_minutes"]),
+            "notes_written": [
+                {
+                    "file": (os.path.relpath(fp, repo) if repo and fp.startswith(repo) else fp),
+                    "abs_path": fp,
+                    "text": clip_block("\n\n---\n\n".join(chunks), cfg["max_notes_chars_per_file"]),
+                }
+                for fp, chunks in s["notes"].items()
+            ],
             "vcs_commands": s["vcs_commands"][:10],
         })
     out.sort(key=lambda x: x["start"] or "")
@@ -287,7 +343,7 @@ def _new_session(sid):
     return {
         "id": sid, "titles": set(), "first": None, "last": None,
         "cwds": set(), "branches": set(), "prompts": [], "files": set(),
-        "vcs_commands": [], "turns": 0,
+        "vcs_commands": [], "turns": 0, "times": [], "notes": {},
     }
 
 
@@ -556,6 +612,14 @@ def main():
 
     if srcs.get("claude_code", True):
         digest["sources"]["claude_code"] = safe("claude_code", collect_claude, cfg, start, end)
+        files = {}
+        for sess in digest["sources"]["claude_code"].get("sessions", []):
+            for n in sess.get("notes_written", []):
+                files.setdefault(n["abs_path"], []).append(sess["session_id"])
+        digest["progress_files"] = [
+            {"abs_path": fp, "exists": Path(fp).exists(), "sessions": sids}
+            for fp, sids in sorted(files.items())
+        ]
     else:
         digest["sources"]["claude_code"] = {"status": "disabled"}
 

@@ -6,7 +6,7 @@
   "git_author_emails": [],
   "standup": {
     "headings": {
-      "progress": "Previous Work day Progress",
+      "progress": "Previous work day progress",
       "plans": "Plans for today",
       "blockers": "Blockers"
     },
