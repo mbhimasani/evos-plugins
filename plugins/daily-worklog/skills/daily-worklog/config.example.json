@@ -1,0 +1,21 @@
+{
+  "role": "Software engineer on the platform team. Most of my work is code in the repos below, plus PR reviews and release planning.",
+  "output_dir": "~/worklogs",
+  "repo_roots": ["~/code"],
+  "repos": [],
+  "git_author_emails": [],
+  "standup": {
+    "headings": {
+      "progress": "Previous Work day Progress",
+      "plans": "Plans for today",
+      "blockers": "Blockers"
+    },
+    "max_plan_bullets": 3,
+    "example": ""
+  },
+  "sources": {
+    "claude_code": true,
+    "cursor": true,
+    "git": true
+  }
+}

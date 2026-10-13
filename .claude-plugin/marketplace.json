@@ -1,0 +1,11 @@
+{
+  "name": "meghana-evos-plugins",
+  "owner": { "name": "Meghana Bhimasani" },
+  "plugins": [
+    {
+      "name": "daily-worklog",
+      "source": "./plugins/daily-worklog",
+      "description": "Daily work log and standup generator from local coding sessions and connected tools."
+    }
+  ]
+}
