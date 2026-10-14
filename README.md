@@ -47,18 +47,18 @@ Then edit it:
 - `standup`**:** your standup headings, how many plan bullets you want, and optionally an `example` plans bullet written the way you'd say it. The example is the best way to get plans in your own voice.
 
 
-| Setting                    | Default                                                 | Notes                                       |
-| -------------------------- | ------------------------------------------------------- | ------------------------------------------- |
-| `role`                     | empty (inferred from activity)                          | Free text; the more specific, the better    |
-| `output_dir`               | `~/worklogs`                                            | Where daily files go                        |
-| `repo_roots`               | `[]`                                                    | Folders whose immediate children are repos  |
-| `repos`                    | `[]`                                                    | Individual repo paths                       |
-| `git_author_emails`        | per-repo `git config user.email`                        | Add more if you commit from multiple emails |
-| `standup.headings`         | Previous Work day Progress / Plans for today / Blockers | Rename to match your team's format          |
-| `standup.max_plan_bullets` | `3`                                                     | Upper limit; the skill often uses fewer     |
-| `standup.example`          | empty                                                   | One plans bullet in your own words          |
+| Setting                    | Default                                                 | Notes                                                                                                       |
+| -------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `role`                     | empty (inferred from activity)                          | Free text; the more specific, the better                                                                    |
+| `output_dir`               | `~/worklogs`                                            | Where daily files go                                                                                        |
+| `repo_roots`               | `[]`                                                    | Folders whose immediate children are repos                                                                  |
+| `repos`                    | `[]`                                                    | Individual repo paths                                                                                       |
+| `git_author_emails`        | per-repo `git config user.email`                        | Add more if you commit from multiple emails                                                                 |
+| `standup.headings`         | Previous Work day Progress / Plans for today / Blockers | Rename to match your team's format                                                                          |
+| `standup.max_plan_bullets` | `3`                                                     | Upper limit; the skill often uses fewer                                                                     |
+| `standup.example`          | empty                                                   | One plans bullet in your own words                                                                          |
 | `notes_patterns`           | `.plans/`, `*notes*.md`, `*plan*.md`, `*todo*.md`, …    | Files where Claude Code keeps your session notes. What gets written to them each day feeds the detailed log |
-| `sources.cursor` etc.      | `true`                                                  | Set `false` to skip a local source          |
+| `sources.cursor` etc.      | `true`                                                  | Set `false` to skip a local source                                                                          |
 
 
 **3. Make sure Python 3 is available.** Run `python3 --version`. If macOS prompts you to install the Command Line Tools, accept. The collector uses only the standard library.
@@ -84,6 +84,29 @@ In the Claude desktop app: **Code → Routines → New routine → Local**. Set 
 For a morning run, use "for yesterday" instead. The skill treats yesterday as Friday on Mondays.
 
 The desktop app has to be open for local tasks to fire.
+
+## Including Claude chat conversations
+
+The collector reads what's on your Mac. That covers Claude Code sessions from the terminal, and should also cover local sessions in the desktop app's Code tab, which store their history in the same place. It doesn't cover regular Claude chats on [claude.ai](http://claude.ai), the desktop app, or mobile: those conversations are stored with your [claude.ai](http://claude.ai) account in the cloud, and there's no way for the plugin to read them. Cloud (remote) Claude Code sessions aren't covered either.
+
+When a chat was real work (a design discussion, debugging help, a planning session), add a summary of it to that day's log by hand. The skill reads the `## Notes` section as evidence and folds it into the right workstream and the Timeline.
+
+**1. At the end of the chat, ask Claude to summarize it:**
+
+> Summarize this conversation for my work log: what I was trying to do, what we worked out, decisions made and why, open questions, and next steps. Include ticket IDs, repo names, and people's names exactly. Format it as markdown under a `### Chat: <short title> (<start time>–<end time>)` heading.
+
+**2. Copy the summary and add it to the Notes section of that day's log.** Notes is always the last section of the file, so you can simply append to it. With the summary on your clipboard, this adds it to today's log, creating the file if needed:
+
+```bash
+f=~/worklogs/$(date +%F).md; [ -f "$f" ] || printf '## Notes\n' > "$f"; { echo; pbpaste; echo; } >> "$f"
+
+```
+
+Change `~/worklogs` if you set a different `output_dir`. For an earlier day, replace `$(date +%F)` with the date, e.g. `2026-10-12`.
+
+**3. Generate (or regenerate) the log as usual.** It's fine to add notes before the log exists; the skill builds the rest of the file above them. Regenerating never changes anything from `## Notes` down.
+
+Doing this right after a chat ends works best. The summary is most accurate while the conversation is fresh, and the times in the heading let the skill put it in the Timeline.
 
 ## What it reads, and privacy
 

@@ -51,8 +51,14 @@ DEFAULTS = {
         "max_plan_bullets": 3,
         "example": "",        # optional: a plans bullet written in your own voice
     },
+    # Limits for the compact digest only. Nothing is lost past these limits:
+    # every session's full prompt trail and notes go to a per-session details
+    # file (see details_dir), which the skill reads for long sessions.
     "max_prompts_per_session": 50,
     "max_prompt_chars": 1000,
+    "details_dir": "~/.cache/daily-worklog",
+    "max_detail_prompt_chars": 4000,
+    "long_session_minutes": 90,   # sessions longer than this are flagged long
     # Files that hold your own session notes / plans. Text Claude Code wrote
     # to these during the window is captured so the log can say what you learned.
     "notes_patterns": [
@@ -222,7 +228,24 @@ def is_noise_prompt(text):
     return t.startswith(noise_prefixes)
 
 
-def collect_claude(cfg, start, end):
+def sample_evenly(n, k):
+    """Indices of up to k items spread across n: always the first and last few."""
+    if n <= k:
+        return list(range(n))
+    edge = min(5, k // 4)
+    middle = k - 2 * edge
+    picks = set(range(edge)) | set(range(n - edge, n))
+    span = n - 2 * edge
+    for j in range(middle):
+        picks.add(edge + int(j * span / middle))
+    return sorted(picks)
+
+
+def fmt_hm(dt):
+    return dt.astimezone().strftime("%H:%M") if dt else "--:--"
+
+
+def collect_claude(cfg, start, end, details_dir=None):
     root = expand(cfg["claude_projects_dir"])
     if not root.exists():
         return {"status": "not_found", "path": str(root), "sessions": []}
@@ -266,9 +289,14 @@ def collect_claude(cfg, start, end):
                 msg = e.get("message") or {}
                 if e.get("type") == "user" and not e.get("isMeta") and not e.get("isSidechain"):
                     txt = text_from_content(msg.get("content"))
-                    if not is_noise_prompt(txt):
-                        s["prompts"].append(
-                            clip(redact(txt), cfg["max_prompt_chars"]))
+                    if e.get("isCompactSummary") or txt.lstrip().startswith(
+                            "This session is being continued from a previous conversation"):
+                        # Claude Code's own summary written when context was compacted
+                        s["compact_summaries"].append(
+                            {"time": iso_local(ts),
+                             "text": clip_block(redact(txt), cfg["max_notes_chars_per_file"])})
+                    elif not is_noise_prompt(txt):
+                        s["prompts"].append((ts, redact(txt)))
                 elif e.get("type") == "assistant":
                     s["turns"] += 1
                     for block in msg.get("content") or []:
@@ -308,10 +336,43 @@ def collect_claude(cfg, start, end):
         files = sorted(s["files"])
         if repo:
             files = [os.path.relpath(p, repo) if p.startswith(repo) else p for p in files]
-        prompts = s["prompts"]
-        if len(prompts) > cfg["max_prompts_per_session"]:
-            k = cfg["max_prompts_per_session"]
-            prompts = prompts[: k - 3] + ["…"] + prompts[-2:]
+        all_prompts = sorted(s["prompts"], key=lambda x: x[0])
+        picked = sample_evenly(len(all_prompts), cfg["max_prompts_per_session"])
+        prompts = [
+            f"{fmt_hm(all_prompts[i][0])} {clip(all_prompts[i][1], cfg['max_prompt_chars'])}"
+            for i in picked
+        ]
+        minutes = active_minutes(s["times"], cfg["idle_gap_minutes"])
+        notes_full = {fp: "\n\n---\n\n".join(chunks) for fp, chunks in s["notes"].items()}
+        notes_truncated = any(len(t) > cfg["max_notes_chars_per_file"] for t in notes_full.values())
+        long_session = (
+            len(all_prompts) > len(picked)
+            or minutes >= cfg["long_session_minutes"]
+            or notes_truncated
+            or bool(s["compact_summaries"])
+        )
+        details_file = None
+        if details_dir is not None:
+            details_file = details_dir / f"claude-{s['id']}.json"
+            details_file.write_text(json.dumps({
+                "session_id": s["id"],
+                "title": sorted(s["titles"])[0] if s["titles"] else None,
+                "repo": repo,
+                "branches": sorted(s["branches"]),
+                "start": iso_local(s["first"]),
+                "end": iso_local(s["last"]),
+                "active_minutes": minutes,
+                "prompts": [
+                    {"time": fmt_hm(t), "text": clip_block(txt, cfg["max_detail_prompt_chars"])}
+                    for t, txt in all_prompts
+                ],
+                "compact_summaries": s["compact_summaries"],
+                "notes_written": [
+                    {"file": fp, "text": t} for fp, t in notes_full.items()
+                ],
+                "files_edited": files,
+                "vcs_commands": s["vcs_commands"],
+            }, indent=2, ensure_ascii=False))
         out.append({
             "session_id": s["id"],
             "title": sorted(s["titles"])[0] if s["titles"] else None,
@@ -321,17 +382,23 @@ def collect_claude(cfg, start, end):
             "start": iso_local(s["first"]),
             "end": iso_local(s["last"]),
             "assistant_turns": s["turns"],
+            "prompt_count": len(all_prompts),
             "prompts": prompts,
+            "prompts_omitted": len(all_prompts) - len(picked),
+            "long_session": long_session,
+            "details_file": str(details_file) if details_file else None,
+            "compact_summary_count": len(s["compact_summaries"]),
             "files_edited": files[:40],
             "files_edited_count": len(files),
-            "active_minutes": active_minutes(s["times"], cfg["idle_gap_minutes"]),
+            "active_minutes": minutes,
             "notes_written": [
                 {
                     "file": (os.path.relpath(fp, repo) if repo and fp.startswith(repo) else fp),
                     "abs_path": fp,
-                    "text": clip_block("\n\n---\n\n".join(chunks), cfg["max_notes_chars_per_file"]),
+                    "text": clip_block(t, cfg["max_notes_chars_per_file"]),
+                    "truncated": len(t) > cfg["max_notes_chars_per_file"],
                 }
-                for fp, chunks in s["notes"].items()
+                for fp, t in notes_full.items()
             ],
             "vcs_commands": s["vcs_commands"][:10],
         })
@@ -344,6 +411,7 @@ def _new_session(sid):
         "id": sid, "titles": set(), "first": None, "last": None,
         "cwds": set(), "branches": set(), "prompts": [], "files": set(),
         "vcs_commands": [], "turns": 0, "times": [], "notes": {},
+        "compact_summaries": [],
     }
 
 
@@ -604,6 +672,20 @@ def main():
     }
     srcs = cfg["sources"]
 
+    label = start.date().isoformat()
+    if (end - start).days > 1:
+        label += "_to_" + (end - timedelta(days=1)).date().isoformat()
+    details_dir = expand(cfg["details_dir"]) / label
+    try:
+        if details_dir.exists():
+            shutil.rmtree(details_dir)  # fresh each run
+        details_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(details_dir, 0o700)
+        digest["details_dir"] = str(details_dir)
+    except OSError:
+        details_dir = None
+        digest["details_dir"] = None
+
     def safe(name, fn, *a):
         try:
             return fn(*a)
@@ -611,7 +693,7 @@ def main():
             return {"status": f"error: {type(e).__name__}: {e}"}
 
     if srcs.get("claude_code", True):
-        digest["sources"]["claude_code"] = safe("claude_code", collect_claude, cfg, start, end)
+        digest["sources"]["claude_code"] = safe("claude_code", collect_claude, cfg, start, end, details_dir)
         files = {}
         for sess in digest["sources"]["claude_code"].get("sessions", []):
             for n in sess.get("notes_written", []):
@@ -638,6 +720,15 @@ def main():
     else:
         digest["sources"]["git"] = {"status": "disabled"}
 
+    cc = digest["sources"]["claude_code"].get("sessions", [])
+    digest["summary"] = {
+        "claude_sessions": len(cc),
+        "long_sessions": sum(1 for x in cc if x.get("long_session")),
+        "total_prompts": sum(x.get("prompt_count", 0) for x in cc),
+        "total_active_minutes": sum(x.get("active_minutes", 0) for x in cc),
+        "cursor_chats": len(digest["sources"]["cursor"].get("sessions", [])),
+        "days": max(1, (end - start).days),
+    }
     text = json.dumps(digest, indent=2, ensure_ascii=False)
     if args.out:
         Path(args.out).write_text(text)

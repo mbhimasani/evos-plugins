@@ -41,7 +41,9 @@ If the script isn't in this skill's `scripts/` folder, say so plainly in the fin
 
 Each Claude Code session includes:
 
-- `prompts`: what the user asked, in order. Read them as the trail of the user's thinking: the questions they had, where they got stuck, when they changed direction.
+- `prompts`: what the user asked, in order, each prefixed with its time. Read them as the trail of the user's thinking: the questions they had, where they got stuck, when they changed direction. For long sessions this is an evenly spread sample (`prompt_count` is the real total, `prompts_omitted` the number left out).
+- `details_file`: the session's complete record, with every prompt, any `compact_summaries` (Claude Code's own summaries written when the session's context filled up), and all text written to notes files, untruncated. The digest is a compact view; the details file is the source of truth for the session.
+- `long_session`: true when the digest view is incomplete (prompts or notes were cut) or the session ran long. See "Long sessions and big days" below.
 - `active_minutes`: estimated hands-on time (idle gaps excluded), plus `start` and `end`.
 - `notes_written`: the exact text Claude Code wrote during the window into the user's notes or plan files (session notes, `.plans/`, TODO or progress files). This is the richest source of what was learned, what was confusing, and what's next. Because it's only what was written in the window, it won't mix in older or later notes.
 
@@ -69,7 +71,34 @@ Use whichever of these tools are available in this session. If a source isn't co
 
 **Calendar for the plans day** — also fetch the user's accepted events on the plans day. Meetings that are themselves work (customer calls, design reviews, release go/no-go, interviews, planning) can belong in the plans. Recurring routine meetings (standup, team syncs, most 1:1s) don't.
 
-## 4. Synthesize
+## 4. Long sessions and big days
+
+The digest keeps the run fast on ordinary days, but it's a sample. Whenever it isn't the whole picture, read the full record. Use subagents to do that when there's a lot of it, so the raw material doesn't crowd out the rest of the day.
+
+**Use subagents when any of these is true:**
+
+- Two or more sessions have `long_session: true`.
+- `summary.total_prompts` is over about 150, or `summary.total_active_minutes` is over about 5 hours.
+- The window covers more than one day.
+- Slack or Gmail returns far more items than usual (dozens of threads).
+
+**Otherwise**, read the `details_file` of any single long session yourself, in chunks if it's large, and carry on.
+
+**How to delegate.** Launch the subagents in parallel with Claude Code's subagent tool, using a general-purpose agent:
+
+- One subagent per long session, given its `details_file`, the current contents of any notes file it wrote to, the window, and the user's role.
+- For a multi-day range, one subagent per day. Each runs steps 2–3 for its day and returns per-day findings in the same format.
+- For a very large Slack or Gmail day, one subagent per source.
+
+Each subagent's job is to extract, not to summarize. The detailed log is only as good as what comes back, so give each one these instructions in full:
+
+> Read the material for this session and return a detailed, chronological account. Keep specifics; don't generalize. For each phase of the session (with approximate times from the prompt timestamps), report: what the user was trying to do; what they explored (files, modules, functions, docs, tickets, commands, by name); what they learned, as concrete facts; where they were confused, where docs and code disagreed, or what took several attempts, and whether and how it was resolved; decisions made and why, including approaches tried and dropped; and next steps they noted. Preserve every Linear ID, branch, repo, PR, customer name, and person's name exactly; the main agent uses them to link sources. Paraphrase rather than pasting long text; short phrases from the user's own notes are fine where wording matters. Don't evaluate the user's work or add advice. Leave out anything personal, HR-related, benefits, payroll, or secrets (including `[REDACTED]` markers). Length should match the session: a 4-hour session can warrant 40+ lines.
+
+For a Slack or Gmail subagent, ask instead for one line per thread: channel or subject, topic, outcome, any commitment the user made, and any ticket IDs, customers, or people mentioned. Keep the same privacy rules.
+
+**What stays with you.** Linking across sources, the Timeline, the Standup block, and writing the file stay in the main agent. Workstreams are built by combining the subagents' accounts with everything else. Don't paste a subagent's account in as a workstream unchanged. If subagents aren't available, read the details files directly in chunks instead; the result should be the same, just slower.
+
+## 5. Synthesize
 
 Group everything into **workstreams**: a feature, bug, customer, release, hire, or initiative. Don't list activity per tool. Link the evidence together:
 
@@ -139,9 +168,11 @@ What the plans tend to look like by role (illustrations of shape, not text to co
 >
 > *Engineering manager:* Finalize the Q4 staffing plan for review Friday; run the two candidate debriefs and send hiring decisions at that point.
 
-## 5. Write the file
+## 6. Write the file
 
-Write to `<output_dir>/<YYYY-MM-DD>.md`. If the file already exists, regenerate everything except the `## Notes` section, which the user may have written by hand. Keep that section exactly as it is.
+Write to `<output_dir>/<YYYY-MM-DD>.md`. `## Notes` is always the last section of the file, and it belongs to the user. If the file already exists, keep everything from the `## Notes` heading to the end of the file exactly as it is, and regenerate everything above it.
+
+**Read the Notes section before you synthesize, and treat it as evidence.** Users add summaries of Claude chat conversations there (usually under `### Chat: <title>` headings, sometimes with a time), since those chats live in the cloud where the collector can't see them. They may also add notes about offline work. Fold this material into the matching workstreams, add a Timeline row when a time is given, and let it inform the Standup block. If the file contains only a Notes section, that's expected: the user added notes before the log was first generated. Files from older versions of this skill have a `Sources:` footer after the Notes section; when regenerating one, remove that old footer line and the `---` above it, and keep the rest of Notes untouched.
 
 Use this structure, with the configured headings in place of the angle-bracket labels:
 
@@ -198,16 +229,16 @@ Use this structure, with the configured headings in place of the angle-bracket l
 | Repo | Commits | Claude Code sessions | Cursor chats |
 |---|---|---|---|
 
-## Notes
-<!-- Your own notes. Preserved when this file is regenerated. -->
-
 ---
 Sources: <checked sources> · Not checked: <missing/failed sources>
+
+## Notes
+<!-- Your own notes and Claude chat summaries. Preserved when this file is regenerated. -->
 ```
 
 Leave out any section with nothing in it, except Standup and Notes. For example, a manager with no coding activity gets no "Activity by repo" table. Keep the Standup block short enough to paste into Slack as-is.
 
-## 6. Privacy rules
+## 7. Privacy rules
 
 These logs live on the user's machine and may be pasted to teammates, so:
 
@@ -218,7 +249,7 @@ These logs live on the user's machine and may be pasted to teammates, so:
 - Keep the collector's `[REDACTED]` markers out of the log entirely; don't try to reconstruct what was there.
 - Never post, send, or share the log anywhere. Write the file and stop. If the user asks to post the standup, show them the text and let them send it, or ask before using a send tool.
 
-## 7. Finish
+## 8. Finish
 
 Reply with the file path and the Standup block. Then, in one line, name any sources that weren't checked and why (not connected, not installed, error). Nothing else.
 
