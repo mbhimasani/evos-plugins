@@ -1,6 +1,6 @@
 {
   "name": "daily-worklog",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Daily work log and standup generator: Claude Code, Cursor, git, Linear, Slack, Gmail, Google Calendar, and Granola, written to a dated markdown file.",
   "author": { "name": "Meghana Bhimasani" }
 }

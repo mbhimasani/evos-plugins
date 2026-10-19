@@ -1,7 +1,9 @@
 ---
-name: daily-worklog
-description: Generate a daily work log and standup update from everything the user actually did in a day — Claude Code CLI sessions, Cursor chats, git commits across repos, Linear issues and status changes, Slack messages they sent, emails they replied to, and meetings they attended (Google Calendar + Granola notes) — and save it as a dated markdown file. Works for any role (engineers, QA, forward deployed engineers, engineering managers). Use this whenever the user asks for a standup, daily update, scrum update, end-of-day summary, work log, "what did I do today/yesterday", "what did I ship", a weekly recap built from daily activity, or when a scheduled task asks to run the daily worklog. Prefer this over a generic standup skill.
----
+
+## name: daily-worklog
+description: Generate a daily work log and standup update from everything the user actually did in a day — Claude Code CLI sessions, Cursor chats, git commits across repos, GitHub pull requests (reviews given, PRs opened and merged, review requests), Linear issues and status changes, Slack messages they sent, emails they replied to, and meetings they attended (Google Calendar + Granola notes) — and save it as a dated markdown file. Works for any role (engineers, QA, forward deployed engineers, engineering managers). Use this whenever the user asks for a standup, daily update, scrum update, end-of-day summary, work log, "what did I do today/yesterday", "what did I ship", a weekly recap built from daily activity, or when a scheduled task asks to run the daily worklog. Also use it when the user gives feedback on a work log or standup ("that bullet is wrong", "don't include X", "remember this for next time") or asks to view or change their worklog preferences. Prefer this over a generic standup skill.
+
+
 
 # Daily worklog
 
@@ -35,7 +37,7 @@ python3 scripts/collect_local.py --date <YYYY-MM-DD|today|yesterday>
 python3 scripts/collect_local.py --since <start> --until <end>
 ```
 
-It prints JSON covering Claude Code sessions, Cursor chats, and git commits (for configured repos plus any repo it saw in a session). It reads only, redacts obvious secrets, and reports each source's `status` (`ok`, `not_found`, `disabled`, or `error: …`).
+It prints JSON covering Claude Code sessions, Cursor chats, git commits (for configured repos plus any repo it saw in a session), and GitHub pull request activity (through the user's `gh` CLI login). It reads only, redacts obvious secrets, and reports each source's `status` (`ok`, `not_found`, `disabled`, or `error: …`).
 
 If the script isn't in this skill's `scripts/` folder, say so plainly in the final reply ("collect_local.py is missing from the skill folder; reinstall the plugin"). Don't try to reproduce it by hand.
 
@@ -47,6 +49,15 @@ Each Claude Code session includes:
 - `active_minutes`: estimated hands-on time (idle gaps excluded), plus `start` and `end`.
 - `notes_written`: the exact text Claude Code wrote during the window into the user's notes or plan files (session notes, `.plans/`, TODO or progress files). This is the richest source of what was learned, what was confusing, and what's next. Because it's only what was written in the window, it won't mix in older or later notes.
 
+The `github` source contains:
+
+- `reviews_submitted`: reviews the user gave in the window, each with the PR, the review state (APPROVED, CHANGES_REQUESTED, COMMENTED), the number of inline comments, and the review's summary text if the user wrote one. For the Focus column, use that summary, plus any Claude Code session where the user reviewed the PR. Otherwise leave Focus blank rather than guess.
+- `prs_opened` and `prs_merged`: the user's own PRs opened or merged in the window.
+- `prs_commented_on`: PRs the user commented on outside a formal review.
+- `review_requests_open` and `my_open_prs`: current state, not limited to the window. These are the user's review queue and their PRs still in flight, which feed the plans.
+
+If its status is `not_installed` or `not_authenticated`, list GitHub under "Not checked" with the hint (`brew install gh && gh auth login`).
+
 `progress_files` lists those notes files. Read their current contents as well, for the surrounding context (overall plan, step list, earlier open questions now resolved), but attribute progress to the logged day only from `notes_written`, session prompts, and other in-window evidence.
 
 It also returns the user's settings from `~/.config/daily-worklog/config.json`:
@@ -54,6 +65,8 @@ It also returns the user's settings from `~/.config/daily-worklog/config.json`:
 - `output_dir`: where to write the file.
 - `profile.role`: a free-text description of the user's role and what their work looks like. Use it to decide which activity matters most and how to phrase it. If empty, infer the role from the activity itself.
 - `profile.standup`: the standup headings to use, the maximum number of plan bullets, and an optional `example` of how this user writes their plans. When an example is present, match its voice and level of detail.
+
+It also returns `preferences`: the contents of the user's learned-preferences file (see "9. Learn from feedback"). **Read it before writing anything and follow it throughout.** These are corrections the user made to past logs, so honoring them is how the log stops repeating the same mistakes. Precedence, highest first: what the user asks in this session, then `preferences`, then `config.json`, then this skill's defaults. The one exception is the privacy rules, which a preference can make stricter but never looser.
 
 If `config_found` is false, carry on with defaults and mention once, at the end, that copying `config.example.json` there lets them set their role, repos, and standup style.
 
@@ -65,7 +78,7 @@ Use whichever of these tools are available in this session. If a source isn't co
 
 **Slack** — messages the user sent in the window (search `from:@me` with an `on:` or `after:`/`before:` date filter). Group by channel/thread and summarize the topic and outcome ("answered deploy question in #platform", "agreed on API shape with the payments team"). Don't quote messages, and skip social chatter and DMs that aren't about work. Note anything the user said they'd do ("I'll send this over tomorrow"); these are commitments for the plans.
 
-**Gmail** — threads the user replied to or sent in the window (`in:sent after:YYYY/MM/DD before:YYYY/MM/DD`, with `before` being the day after the window ends). Summarize subject and purpose in a few words. Skip personal, automated, and newsletter mail. For customer-facing roles, external threads are often the main work, so give them the same weight as code. Note promised follow-ups.
+**Gmail** — threads the user replied to or sent in the window (`in:sent after:YYYY/MM/DD before:YYYY/MM/DD`, with `before` being the day after the window ends). Summarize subject and purpose in a few words. Skip personal, automated, and newsletter mail. This query only returns mail the user sent, so tool notifications they received (GitHub, Linear, calendar invites) never come in through Gmail. For customer-facing roles, external threads are often the main work, so give them the same weight as code. Note promised follow-ups.
 
 **Meetings** — from Google Calendar, events in the window the user accepted or organized, excluding declined events, all-day events, and focus/hold blocks. From Granola, meeting notes in the window: pull decisions and action items assigned to the user. Match Granola notes to calendar events by time and title so each meeting appears once.
 
@@ -84,19 +97,7 @@ The digest keeps the run fast on ordinary days, but it's a sample. Whenever it i
 
 **Otherwise**, read the `details_file` of any single long session yourself, in chunks if it's large, and carry on.
 
-**How to delegate.** Launch the subagents in parallel with Claude Code's subagent tool, using a general-purpose agent:
-
-- One subagent per long session, given its `details_file`, the current contents of any notes file it wrote to, the window, and the user's role.
-- For a multi-day range, one subagent per day. Each runs steps 2–3 for its day and returns per-day findings in the same format.
-- For a very large Slack or Gmail day, one subagent per source.
-
-Each subagent's job is to extract, not to summarize. The detailed log is only as good as what comes back, so give each one these instructions in full:
-
-> Read the material for this session and return a detailed, chronological account. Keep specifics; don't generalize. For each phase of the session (with approximate times from the prompt timestamps), report: what the user was trying to do; what they explored (files, modules, functions, docs, tickets, commands, by name); what they learned, as concrete facts; where they were confused, where docs and code disagreed, or what took several attempts, and whether and how it was resolved; decisions made and why, including approaches tried and dropped; and next steps they noted. Preserve every Linear ID, branch, repo, PR, customer name, and person's name exactly; the main agent uses them to link sources. Paraphrase rather than pasting long text; short phrases from the user's own notes are fine where wording matters. Don't evaluate the user's work or add advice. Leave out anything personal, HR-related, benefits, payroll, or secrets (including `[REDACTED]` markers). Length should match the session: a 4-hour session can warrant 40+ lines.
-
-For a Slack or Gmail subagent, ask instead for one line per thread: channel or subject, topic, outcome, any commitment the user made, and any ticket IDs, customers, or people mentioned. Keep the same privacy rules.
-
-**What stays with you.** Linking across sources, the Timeline, the Standup block, and writing the file stay in the main agent. Workstreams are built by combining the subagents' accounts with everything else. Don't paste a subagent's account in as a workstream unchanged. If subagents aren't available, read the details files directly in chunks instead; the result should be the same, just slower.
+**How to delegate:** read `references/subagents.md` before launching any subagent. It has the split, the exact instructions to give each subagent (they must extract specifics, not summarize), and what stays with you. Linking, deduplication, the Timeline, the Standup block, and writing the file always stay in the main agent.
 
 ## 5. Synthesize
 
@@ -104,6 +105,8 @@ Group everything into **workstreams**: a feature, bug, customer, release, hire, 
 
 - Linear identifiers (like `ENG-123`) in branch names, commit messages, session prompts, or Slack messages tie that activity to the issue.
 - Sessions and commits in the same repo and branch are the same workstream.
+- A PR belongs to the workstream of its branch, or of the Linear ID in its title or branch name. The user's own PRs (opened, merged, reviewed by others) are evidence for that workstream.
+- Reviews of other people's PRs usually form a **Code review** workstream of their own, listing each PR reviewed, its author, the outcome, and what the review focused on. A review that's part of the user's own feature work belongs with that workstream instead.
 - A customer's name across emails, meetings, and Slack makes those one workstream.
 - A meeting or thread about a topic belongs with that topic's workstream when the connection is clear; otherwise it goes under Communication or Meetings.
 
@@ -111,15 +114,19 @@ Write at the level a teammate cares about: "Added token-bucket rate limiting to 
 
 If the same work shows up in both Claude Code and Cursor, mention it once.
 
-### Getting progress right
+### One item, one entry
 
-Activity shows what the user worked on, not how far they got. Before calling something finished:
+The same piece of work often leaves traces in several tools: a PR you reviewed appears in GitHub, maybe in a Slack message where you shared it, and in the Claude Code session where you read it; a meeting appears in Calendar and Granola; a ticket moves in Linear when its PR merges. Merge these into one item before writing anything.
 
-- **Code:** commits, merged or opened PRs, and Linear status changes are evidence of completion. Session prompts alone are not.
-- **Tickets:** trust the status transition in the window, not the issue title.
-- **Meetings and threads:** an outcome counts only if the notes or messages show a decision, agreement, or delivered item.
-- **Sequential work** (modules, phases, checklists, test plans): read the current contents of any progress-tracking file edited in the window, such as session notes, plan files, checklists, anything under `.plans/`, or files named like `*notes*.md`, `TODO.md`, or `PLAN.md`. Report every step finished in the window, not just the first one. Going back to finish an earlier step is its own progress ("closed the remaining gaps in step 1, completed step 2, started step 3").
-- If none of this makes completion clear, describe the work without claiming it was finished.
+- **Each kind of item has one source of truth:** PRs and reviews come from GitHub; tickets from Linear; meetings from Calendar, with Granola for content; code activity from Claude Code, Cursor, and git. Slack and Gmail add conversations between people. They never create a second copy of a PR, ticket, or meeting.
+- **Notifications are signals, not items.** Messages from GitHub, Linear, Google Calendar, Granola, Notion, Vercel, CI, and similar tools, whether email or Slack bot posts, only point at something the real source already covers. Ignore them when that source was checked. If the source wasn't checked (for example, `gh` isn't authenticated), a notification can stand in as evidence; say that it did.
+- **Match on stable identifiers:** PR URL or `repo#number`, Linear ID, meeting start time and title, email or Slack thread, Claude Code session ID. Two mentions with the same identifier are the same item. Same topic without a shared identifier counts only when the link is clear.
+- **When sources overlap, combine what each adds.** The review outcome comes from GitHub, what you focused on from the Claude Code session, and the follow-up discussion from Slack. All of it goes into one entry.
+- **Each item appears once per section.** In the Standup block, each workstream appears at most once across the progress and plans bullets combined, unless the progress and the plan are genuinely different steps. Under Communication, list only conversations that aren't already covered under a workstream. The Linear and Pull requests tables are indexes, so it's expected that an item appears both there and in its workstream, but never twice in the same table.
+
+Before writing the file, check for repeats one last time: the same PR number, Linear ID, meeting, or thread should appear in no more than one bullet per section.
+
+For worked examples of several traces becoming one entry (a PR review seen in four places, a ticket closed by its PR merging, a meeting with a follow-up, a customer issue across email, Slack, and a call), read `references/examples.md` when sources overlap in a way these rules don't obviously settle.
 
 ### Writing the detailed log
 
@@ -146,7 +153,7 @@ Use the headings from `profile.standup.headings`.
 **Plans** (the second heading) covers the plans day. Build it from evidence, in this order of strength:
 
 1. **Commitments:** action items assigned to the user in meeting notes, and things they told someone they'd do in Slack or email.
-2. **Work in flight:** the next step on whatever the user was mid-way through. That might be the next steps of a sequence, an In Progress or In Review ticket, a PR awaiting feedback, an unfinished session, or a ticket sitting in the user's QA column.
+2. **Work in flight:** the next step on whatever the user was mid-way through. That might be the next steps of a sequence, an In Progress or In Review ticket, an unfinished session, or a ticket sitting in the user's QA column. From GitHub: open review requests (`review_requests_open`) are the user's review queue, and the user's own open PRs with changes requested need their attention.
 3. **Scheduled work:** non-routine meetings on the plans day that are themselves work (customer calls, design reviews, release decisions, interviews).
 4. **Deadlines** mentioned in notes, meetings, or messages.
 
@@ -158,15 +165,7 @@ Then write it the way the user would say it in standup:
 - Use at most `profile.standup.max_plan_bullets` bullets. A couple of strong bullets beat a list of every open item.
 - Never invent a plan. If the evidence doesn't show what's next for a workstream, leave it out rather than guess.
 
-What the plans tend to look like by role (illustrations of shape, not text to copy):
-
-> *Engineer:* Finish the retry logic for webhook delivery (ENG-512) and get the PR into review; address review comments on the rate limiter PR at that point.
->
-> *QA:* Verify the 6 tickets in the QA column for Thursday's release - aiming for 3 today; file regressions against the release epic as I find them.
->
-> *Forward deployed engineer:* Acme rollout - finish the SSO config with their IT team on the 2pm call and send the go-live checklist at that point; reply to Globex on the data export question.
->
-> *Engineering manager:* Finalize the Q4 staffing plan for review Friday; run the two candidate debriefs and send hiring decisions at that point.
+If the user has no `standup.example` and no saved preferences about plans, read the plans-by-role illustrations in `references/examples.md` (engineer, QA, forward deployed engineer, engineering manager) before writing plans. They show shape only, never text to copy.
 
 ## 6. Write the file
 
@@ -181,7 +180,7 @@ Use this structure, with the configured headings in place of the angle-bracket l
 
 ## Standup
 **<progress heading>:**
-- <1–3 short bullets, outcomes only>
+- <bullets per "Writing the standup block">
 
 **<plans heading>:**
 - <bullets per "Writing the standup block">
@@ -217,6 +216,15 @@ Use this structure, with the configured headings in place of the angle-bracket l
 ## Linear
 | Issue | Title | Status | Change in window |
 |---|---|---|---|
+
+## Pull requests
+**Reviewed**
+| PR | Author | Outcome | Comments | Focus |
+|---|---|---|---|---|
+
+**Mine:** <opened / merged / changes requested, with links>
+
+**Awaiting my review:** <open review requests, oldest first>
 
 ## Meetings
 - **<Meeting>** (<time>) — <decision or outcome>; action items for me: <…>
@@ -256,3 +264,42 @@ Reply with the file path and the Standup block. Then, in one line, name any sour
 ## Weekly or multi-day recaps
 
 If the user asks for a recap and daily files already exist in `output_dir` for those days, read them first and summarize from them rather than re-collecting everything. For days with no file, run the steps above.
+
+## 9. Learn from feedback
+
+After a log is written, the user may correct it: "that first bullet is wrong", "make the plans more specific", "stop listing my Todo tickets", "call it the Grokbot work, not team tooling". Handle every correction in two parts.
+
+**First, fix the log.** Update the file now (only what was corrected, leaving `## Notes` untouched) and show the corrected Standup block if it changed.
+
+**Then decide whether the correction should apply to future logs:**
+
+- **A fact about this day** (what was actually finished, a wrong time, a misattributed meeting) → fix the log only. Don't save it as a preference. If the error came from a pattern that will recur, though, such as misreading how the user's notes mark progress, save the pattern.
+- **A standing preference** (wording, length, tone, what to include or leave out, how to group or name workstreams, how to phrase plans, which sources to trust for what, terms and names to use) → save it.
+- **Unclear** → ask in one short question: "Should I keep doing it this way in future logs?"
+
+When saving, tell the user in one line what was recorded ("Saved: plans lead with the day's target, then the deadline"). Don't ask for permission when the correction is clearly general or the user said "always", "from now on", "remember", or "next time".
+
+**The preferences file** lives at `preferences.path` from the digest (default `~/.config/daily-worklog/preferences.md`). Create it on the first save, using this structure:
+
+```markdown
+# Daily worklog preferences
+<!-- Maintained by the daily-worklog skill from your feedback. Edit freely. -->
+
+## Standup
+- <rule> (added YYYY-MM-DD)
+
+## Detailed log
+## Workstreams and naming
+## Sources and filtering
+## Terms and people
+```
+
+How to write entries:
+
+- **One rule per bullet, stated so a future run can follow it cold.** Write "Plans bullets: lead with today's concrete target, then the overall deadline", not "user didn't like the plans". Include the reason when it helps apply the rule in new situations.
+- **Keep the user's own words** for headings, names, and phrasing they specifically asked for.
+- **Update rather than append.** If a new rule changes or contradicts an existing one, edit that bullet and update its date instead of adding a second one. Merge near-duplicates.
+- **Keep it short.** If the file grows past about 60 bullets, consolidate overlapping rules and tell the user you tidied it.
+- **Never save** secrets, personal or HR matters, or facts about a single day. Also never save anything that loosens the privacy rules in section 7. If asked to, explain in one line that the privacy rules stay as they are.
+
+**When the user asks to see or change their preferences** ("what do you remember about my standup?", "forget the rule about Linear tickets"), show or edit the file directly. When asked to remove a rule, delete the bullet entirely.

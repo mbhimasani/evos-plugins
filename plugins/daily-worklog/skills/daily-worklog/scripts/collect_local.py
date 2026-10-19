@@ -35,10 +35,15 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "daily-worklog" / "config.json"
 
 DEFAULTS = {
     "output_dir": "~/worklogs",
+    # Learned preferences, written by the skill when you correct a log.
+    "preferences_file": "~/.config/daily-worklog/preferences.md",
     "repos": [],              # explicit repo paths
     "repo_roots": [],         # folders whose immediate children are repos
     "git_author_emails": [],  # empty -> uses `git config user.email` per repo
-    "sources": {"claude_code": True, "cursor": True, "git": True},
+    "sources": {"claude_code": True, "cursor": True, "git": True, "github": True},
+    # GitHub via the `gh` CLI. Leave orgs empty to include every repo you
+    # touched, or list orgs (e.g. ["evos-ai"]) to keep personal repos out.
+    "github": {"orgs": []},
     "claude_projects_dir": "~/.claude/projects",
     "cursor_user_dir": "~/Library/Application Support/Cursor/User",
     "role": "",               # free text: what this person's work looks like
@@ -100,6 +105,8 @@ def load_config(path):
         for k, v in user.items():
             if k == "sources" and isinstance(v, dict):
                 cfg["sources"].update(v)
+            elif k == "github" and isinstance(v, dict):
+                cfg["github"].update(v)
             elif k == "standup" and isinstance(v, dict):
                 for sk, sv in v.items():
                     if sk == "headings" and isinstance(sv, dict):
@@ -649,6 +656,171 @@ def collect_git(cfg, start, end, extra_repo_paths):
 
 
 # --------------------------------------------------------------------------- #
+# GitHub (via gh CLI)
+# --------------------------------------------------------------------------- #
+PR_FIELDS = """
+  number title url state isDraft merged mergedAt headRefName updatedAt
+  reviewDecision author { login } repository { nameWithOwner }
+"""
+
+GH_QUERY = """
+query($from: DateTime!, $to: DateTime!, $merged: String!, $requested: String!,
+      $commented: String!, $mine: String!) {
+  viewer {
+    login
+    contributionsCollection(from: $from, to: $to) {
+      pullRequestReviewContributions(first: 100) {
+        nodes {
+          occurredAt
+          pullRequestReview { state url body comments { totalCount } }
+          pullRequest { %(f)s }
+        }
+      }
+      pullRequestContributions(first: 100) {
+        nodes { occurredAt pullRequest { %(f)s } }
+      }
+    }
+  }
+  merged: search(query: $merged, type: ISSUE, first: 50) {
+    nodes { ... on PullRequest { %(f)s } }
+  }
+  requested: search(query: $requested, type: ISSUE, first: 50) {
+    nodes { ... on PullRequest { %(f)s } }
+  }
+  commented: search(query: $commented, type: ISSUE, first: 50) {
+    nodes { ... on PullRequest { %(f)s } }
+  }
+  mine: search(query: $mine, type: ISSUE, first: 50) {
+    nodes { ... on PullRequest { %(f)s } }
+  }
+}
+""" % {"f": PR_FIELDS}
+
+
+def _gh(args, timeout=45):
+    return subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=timeout)
+
+
+def _pr(node):
+    if not isinstance(node, dict) or "number" not in node:
+        return None
+    return {
+        "repo": (node.get("repository") or {}).get("nameWithOwner"),
+        "number": node.get("number"),
+        "title": redact(node.get("title") or ""),
+        "url": node.get("url"),
+        "state": "MERGED" if node.get("merged") else node.get("state"),
+        "draft": node.get("isDraft"),
+        "branch": node.get("headRefName"),
+        "author": (node.get("author") or {}).get("login"),
+        "review_decision": node.get("reviewDecision"),
+        "merged_at": node.get("mergedAt"),
+        "updated_at": node.get("updatedAt"),
+    }
+
+
+def collect_github(cfg, start, end):
+    if not shutil.which("gh"):
+        return {"status": "not_installed",
+                "hint": "brew install gh && gh auth login"}
+    try:
+        auth = _gh(["auth", "status"], timeout=15)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"status": f"error: {e}"}
+    if auth.returncode != 0:
+        return {"status": "not_authenticated", "hint": "gh auth login"}
+
+    try:
+        who = _gh(["api", "user", "--jq", ".login"], timeout=15)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"status": f"error: {e}"}
+    login = who.stdout.strip()
+    if who.returncode != 0 or not login:
+        return {"status": f"error: {who.stderr.strip()[:200]}"}
+
+    rng = f"{start.isoformat(timespec='seconds')}..{end.isoformat(timespec='seconds')}"
+    variables = {
+        "from": start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "to": end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "merged": f"is:pr author:{login} merged:{rng}",
+        "requested": f"is:pr is:open archived:false review-requested:{login}",
+        "commented": f"is:pr commenter:{login} updated:{rng}",
+        "mine": f"is:pr is:open archived:false author:{login}",
+    }
+    args = ["api", "graphql", "-f", f"query={GH_QUERY}"]
+    for k, v in variables.items():
+        args += ["-f", f"{k}={v}"]
+    try:
+        out = _gh(args)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"status": f"error: {e}"}
+    try:
+        data = json.loads(out.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if out.returncode != 0 or "data" not in data:
+        msg = (data.get("errors") or [{}])[0].get("message") if isinstance(data, dict) else None
+        return {"status": f"error: {msg or out.stderr.strip()[:200]}"}
+    d = data["data"]
+
+    orgs = [o.lower() for o in cfg["github"].get("orgs") or []]
+
+    def keep(pr):
+        if pr is None or not pr.get("repo"):
+            return False
+        return not orgs or pr["repo"].split("/")[0].lower() in orgs
+
+    cc = (d.get("viewer") or {}).get("contributionsCollection") or {}
+
+    reviews = []
+    for n in (cc.get("pullRequestReviewContributions") or {}).get("nodes") or []:
+        pr = _pr(n.get("pullRequest"))
+        if not keep(pr):
+            continue
+        rv = n.get("pullRequestReview") or {}
+        reviews.append({
+            "time": iso_local(parse_iso(n.get("occurredAt"))),
+            "review_state": rv.get("state"),   # APPROVED / CHANGES_REQUESTED / COMMENTED
+            "review_comments": (rv.get("comments") or {}).get("totalCount"),
+            "review_url": rv.get("url"),
+            "review_summary": clip(redact(rv.get("body") or ""), 500) or None,
+            "pr": pr,
+        })
+
+    opened = []
+    for n in (cc.get("pullRequestContributions") or {}).get("nodes") or []:
+        pr = _pr(n.get("pullRequest"))
+        if keep(pr):
+            opened.append(dict(pr, opened_at=iso_local(parse_iso(n.get("occurredAt")))))
+
+    def search_list(key):
+        return [p for p in (_pr(n) for n in (d.get(key) or {}).get("nodes") or []) if keep(p)]
+
+    reviewed_urls = {r["pr"]["url"] for r in reviews}
+    commented = [p for p in search_list("commented") if p["url"] not in reviewed_urls]
+
+    return {
+        "status": "ok",
+        "login": login,
+        "orgs_filter": orgs or None,
+        "reviews_submitted": sorted(reviews, key=lambda r: r["time"] or ""),
+        "prs_opened": opened,
+        "prs_merged": search_list("merged"),
+        "prs_commented_on": commented,          # comments outside a formal review
+        # Current state, not limited to the window -- useful for plans:
+        "review_requests_open": search_list("requested"),
+        "my_open_prs": search_list("mine"),
+    }
+
+
+def read_preferences(path):
+    try:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
+        text = ""
+    return {"path": str(path), "exists": path.exists(), "text": text}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -668,6 +840,7 @@ def main():
         "config_found": cfg_found,
         "output_dir": str(expand(cfg["output_dir"])),
         "profile": {"role": cfg.get("role", ""), "standup": cfg["standup"]},
+        "preferences": read_preferences(expand(cfg["preferences_file"])),
         "sources": {},
     }
     srcs = cfg["sources"]
@@ -719,6 +892,11 @@ def main():
         digest["sources"]["git"] = safe("git", collect_git, cfg, start, end, seen)
     else:
         digest["sources"]["git"] = {"status": "disabled"}
+
+    if srcs.get("github", True):
+        digest["sources"]["github"] = safe("github", collect_github, cfg, start, end)
+    else:
+        digest["sources"]["github"] = {"status": "disabled"}
 
     cc = digest["sources"]["claude_code"].get("sessions", [])
     digest["summary"] = {

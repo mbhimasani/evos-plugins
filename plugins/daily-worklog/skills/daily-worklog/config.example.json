@@ -13,9 +13,22 @@
     "max_plan_bullets": 3,
     "example": ""
   },
+  "github": {
+    "orgs": []
+  },
+  "notes_patterns": [
+    "*/.plans/*",
+    "*notes*.md",
+    "*plan*.md",
+    "*todo*.md",
+    "*learnings*.md",
+    "*journal*.md",
+    "*progress*.md"
+  ],
   "sources": {
     "claude_code": true,
     "cursor": true,
-    "git": true
+    "git": true,
+    "github": true
   }
 }

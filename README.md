@@ -39,7 +39,7 @@ If the copy command doesn't find the file, run `/plugin` to see where the plugin
 
 Then edit it:
 
-- `role`**:** a sentence or two about what your work looks like. This shapes what the log emphasizes. Examples:
+- `role`**:** a sentence or two about what your work looks like. This shapes what the log mphasizes. Examples:
   - "QA engineer. My work is verifying tickets in the QA column, regression testing before releases, and filing bugs in Linear."
   - "Forward deployed engineer for Acme and Globex. Most of my work is customer calls, email, and deployment config in the customer-configs repo."
   - "Engineering manager for the platform team. My work is 1:1s, planning, PR reviews, hiring, and cross-team coordination."
@@ -63,6 +63,25 @@ Then edit it:
 
 **3. Make sure Python 3 is available.** Run `python3 --version`. If macOS prompts you to install the Command Line Tools, accept. The collector uses only the standard library.
 
+**4. GitHub** The skill reads your PR activity through the GitHub CLI: reviews you gave, PRs you opened, merged, or commented on, open review requests, and your open PRs. It uses your own login, so private org repos work too.
+
+```bash
+brew install gh
+gh auth login        # choose GitHub.com, then HTTPS, then log in with a browser
+gh auth status       # should show you as logged in
+```
+
+If your org uses SSO, authorize the CLI's token for the org when GitHub prompts you (or under GitHub → Settings → Applications). To keep personal repos out of your log, set `github.orgs` in your config, for example `"github": {"orgs": ["your-org"]}`.
+
+Config table rows:
+
+| `github.orgs` | `[]` (all repos) | Only include PRs from these orgs |
+| `sources.github` | `true` | Set `false` to skip GitHub |
+
+What it reads (privacy section):
+
+- **GitHub:** via `gh api`, with your own login. PR titles, states, review outcomes and comment counts, and the summary text of reviews you wrote. It doesn't read code, diffs, or the contents of inline review comments.
+
 ## Use it
 
 Ask Claude Code in plain language:
@@ -72,6 +91,20 @@ Ask Claude Code in plain language:
 - "Give me a recap of this week"
 
 Re-running for the same day regenerates the file but keeps anything you wrote under `## Notes`.
+
+## Teaching it your preferences
+
+When a log isn't quite right, tell Claude in the same session, for example "the first bullet is wrong, I also finished module 2", "keep plans to one bullet", or "stop listing my Todo tickets".
+
+Claude fixes the log right away. If the feedback is something that should apply from now on (wording, length, what to include, how to name workstreams), it also saves it to `~/.config/daily-worklog/preferences.md` and tells you in one line what it saved. Every future run reads that file first. One-off corrections about a single day's facts fix that log only. If Claude can't tell which kind your feedback is, it asks.
+
+Words like "always", "from now on", or "remember this" make sure a rule gets saved. You can also manage the file directly:
+
+- "What are my worklog preferences?" shows the file.
+- "Forget the rule about Linear tickets" removes that rule.
+- Or open `preferences.md` and edit it yourself. It's plain markdown, organized by section.
+
+Your preferences file is personal, lives outside the plugin, and survives plugin updates. Preferences can make the privacy rules stricter, but never looser.
 
 ## Run it automatically
 
@@ -116,8 +149,6 @@ Doing this right after a chat ends works best. The summary is most accurate whil
 - Obvious secrets (API keys, tokens, `password=` strings) are redacted before anything reaches Claude.
 - The log summarizes; it doesn't paste emails, messages, prompts, or code. It skips personal, HR, and other sensitive topics.
 - Files stay on your machine. Sharing is up to you.
-
-
 
 ## Troubleshooting
 
